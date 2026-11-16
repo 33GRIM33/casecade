@@ -1,0 +1,8 @@
+AttentionTwin 5.0-inbox (versionCode 6)
+Android 8+ (minSdk26), targetSdk36
+Debug-signed demonstration APK
+SHA256 1e1746998ff0eeb725c588615056829d6ddfee1a899650d386363fe13e99e7f1
+Bytes 4298945
+No key is included. Existing on-device key is retained on normal upgrade.
+Build: npm ci; npm run build; npx cap sync android; gradlew assembleDebug testDebugUnitTest
+Test evidence and physical-device limits: VERIFICATION.md

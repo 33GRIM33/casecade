@@ -1,0 +1,14 @@
+from pathlib import Path
+import subprocess,zipfile
+root=Path(__file__).resolve().parent
+target=root.parent/'AttentionTwin-3.0-Project.zip'
+names=subprocess.check_output(['git','ls-files','-co','--exclude-standard','-z'],cwd=root).decode('utf8').split('\0')
+with zipfile.ZipFile(target,'w',zipfile.ZIP_DEFLATED,compresslevel=6) as z:
+ for name in sorted(set(names)):
+  if not name or name.startswith(('deliverables/','release-v2/')):continue
+  source=root/name
+  if source.is_file():z.write(source,'AttentionTwin/'+name)
+with zipfile.ZipFile(target) as z:
+ assert z.testzip() is None
+ assert 'AttentionTwin/release-v3/AttentionTwin-3.0.apk' in z.namelist()
+print(f'Verified {target} ({target.stat().st_size} bytes)')

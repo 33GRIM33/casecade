@@ -1,300 +1,96 @@
 package com.attentiontwin.app;
 
-import android.app.Notification;
-import android.content.ComponentName;
-import android.os.Build;
-import android.os.Bundle;
+import android.app.*;
+import android.content.*;
+import android.os.*;
+import android.service.notification.*;
 import android.util.Log;
-import android.service.notification.NotificationListenerService;
-import android.service.notification.StatusBarNotification;
+import org.json.*;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
-import java.util.Locale;
+import java.util.*;
+import java.util.concurrent.*;
 
-/** System-bound listener: it continues receiving callbacks while the UI is closed. */
+/** Capture before removing an ordinary alert. Never snooze an entire conversation for AI review. */
 public final class FocusListenerService extends NotificationListenerService {
-    public static volatile boolean connected = false;
-    public static volatile long connectedAt = 0L;
-    private static volatile long lastRebindAttemptAt = 0L;
-    private Store store;
-    private final DecisionEngine engine = new DecisionEngine();
+    public static volatile boolean connected;
+    public static volatile long connectedAt;
+    private static volatile long lastRebindAttemptAt;
+    private static volatile FocusListenerService instance;
+    private Store history;
+    private InboxStore inbox;
+    private final Handler main=new Handler(Looper.getMainLooper());
+    private final ExecutorService classifier=Executors.newFixedThreadPool(2);
+    private final Set<String> scheduled=new HashSet<>(),inFlight=new HashSet<>();
+    private volatile boolean destroyed;
+    private static final java.util.concurrent.atomic.AtomicLong generation=new java.util.concurrent.atomic.AtomicLong();
+    static void invalidateInbox(){generation.incrementAndGet();}
+    interface ReviewProvider{JSONObject review(Context context,JSONArray messages) throws Exception;}
+    static ReviewProvider reviewer=GeminiClient::reviewBatch;
 
-    public static void recheckAndRebind(android.content.Context context) {
-        long now = System.currentTimeMillis();
-        if (FocusUtils.hasNotificationAccess(context) && !connected && now - lastRebindAttemptAt > 30000L) {
-            lastRebindAttemptAt = now;
-            try { NotificationListenerService.requestRebind(new ComponentName(context, FocusListenerService.class)); }
-            catch (RuntimeException ignored) { }
-        }
-    }
+    public static void recheckAndRebind(Context context){long now=System.currentTimeMillis();if(FocusUtils.hasNotificationAccess(context)&&!connected&&now-lastRebindAttemptAt>30000){lastRebindAttemptAt=now;try{requestRebind(new ComponentName(context,FocusListenerService.class));}catch(RuntimeException ignored){}}}
+    static void reviewWaiting(){FocusListenerService service=instance;if(service!=null)service.main.post(()->{if(service.destroyed)return;if(!GeminiClient.enabled(service)){service.inbox.pauseReview();return;}JSONArray groups=service.inbox.pendingGroups();for(int i=0;i<groups.length();i++)service.queue(groups.optString(i));});}
+    @Override public void onCreate(){super.onCreate();history=new Store(this);inbox=new InboxStore(this);inbox.recoverReviewing();instance=this;}
+    @Override public void onListenerConnected(){super.onListenerConnected();connected=true;connectedAt=System.currentTimeMillis();reviewWaiting();main.post(recoverLegacy);}
+    @Override public void onListenerDisconnected(){connected=false;connectedAt=0;try{requestRebind(new ComponentName(this,FocusListenerService.class));}catch(RuntimeException ignored){}super.onListenerDisconnected();}
+    @Override public void onDestroy(){destroyed=true;connected=false;instance=null;main.removeCallbacksAndMessages(null);classifier.shutdownNow();if(history!=null)history.close();if(inbox!=null)inbox.close();super.onDestroy();}
+    @Override public void onNotificationPosted(StatusBarNotification notification){try{receive(notification,false);}catch(Exception error){FocusUtils.prefs(this).edit().putString("last_capture_error","Could not save/encrypt an alert. Its original was left available.").putLong("last_callback_at",System.currentTimeMillis()).apply();Log.e("AttentionTwin","Could not safely capture alert; left available",error);}}
+    private final Runnable recoverLegacy=new Runnable(){public void run(){if(destroyed)return;boolean remain=false;try{StatusBarNotification[] old=getSnoozedNotifications();remain=old!=null&&old.length>0;if(old!=null)for(StatusBarNotification n:old)receive(n,true);}catch(Exception ignored){}if(remain&&System.currentTimeMillis()-connectedAt<24*3600000L)main.postDelayed(this,15000);}};
 
-    @Override public void onCreate() {
-        super.onCreate();
-        store = new Store(this);
-    }
-
-    @Override public void onListenerConnected() {
-        super.onListenerConnected();
-        connected = true;
-        connectedAt = System.currentTimeMillis();
-        Log.d("AttentionTwin", "listener connected");
-    }
-
-    @Override public void onListenerDisconnected() {
-        connected = false;
-        connectedAt = 0L;
-        Log.d("AttentionTwin", "listener disconnected; requesting rebind");
-        requestRebind(new ComponentName(this, FocusListenerService.class));
-        super.onListenerDisconnected();
-    }
-
-    @Override public void onDestroy() {
-        connected = false;
-        if (store != null) store.close();
-        super.onDestroy();
-    }
-
-    @Override public void onNotificationPosted(StatusBarNotification sbn) {
-        try {
-            processNotification(sbn);
-        } catch (Throwable error) {
-            // Notification interception must fail open. In particular, never cancel or snooze
-            // from the recovery path when a DB, parser, or engine unexpectedly fails.
-            Log.e("AttentionTwin", "notification processing failed open", error);
-        }
-    }
-
-    private void processNotification(StatusBarNotification sbn) {
-        if (sbn == null) return;
-        Notification notification = sbn.getNotification();
-        String rawPackage = sbn.getPackageName();
-        long now = System.currentTimeMillis();
-        if (store == null || notification == null) { Log.d("AttentionTwin", "posted callback skipped: listener/store unavailable"); return; }
-        if (isNonActionable(notification)) { recordCallback(now, rawPackage, "skip: ongoing/service/media notification"); return; }
-
-        Bundle extras = notification.extras;
-        boolean isTest = extras != null && extras.getBoolean("at_test", false);
-        String packageName = rawPackage;
-        if (getPackageName().equals(packageName) && !isTest) { recordCallback(now, rawPackage, "skip: app's own notification"); return; }
-        if (isTest) packageName = extras.getString("at_fake_pkg", "com.instagram.android");
-
-        String keyHash = keyHash(sbn.getKey());
-        String label = applicationLabel(packageName);
-        String title = extras == null ? "" : stringExtra(extras, Notification.EXTRA_TITLE);
-        String body = extras == null ? "" : stringExtra(extras, Notification.EXTRA_TEXT);
-        String channel = Build.VERSION.SDK_INT >= 26 ? safe(sbn.getNotification().getChannelId()) : "";
-        String category = FocusUtils.categoryFor(packageName, label);
-        String notificationCategory = safe(notification.category);
-        String roleText = FocusUtils.roleFor(this, packageName);
-        DecisionEngine.AppRole role;
-        try { role = DecisionEngine.AppRole.valueOf(roleText); }
-        catch (RuntimeException ignored) { role = DecisionEngine.AppRole.ALLOW; }
-
-        boolean focus = FocusUtils.isFocusActive(this);
-        // Allow is the default. Evaluate current focus and role before looking at a saved
-        // snooze marker: stale snoozes must never hide a notification after focus ends.
-        if (!focus || role == DecisionEngine.AppRole.ALLOW || role == DecisionEngine.AppRole.IMPORTANT) {
-            FocusUtils.prefs(this).edit().remove("snooze_release_" + keyHash)
-                .remove("snooze_release_once_" + keyHash).apply();
-            recordCallback(now, rawPackage, "decision=ALLOW role=" + roleText + " reason=" +
-                (!focus ? "Focus is off; notification left alone." : role == DecisionEngine.AppRole.IMPORTANT
-                    ? "App is marked Important; notification left alone." : "App is set to Allow; notification left alone."));
-            return;
-        }
-
-        boolean keepPreviews = FocusUtils.prefs(this).getBoolean("keep_previews", false);
-        String urgentWords = FocusUtils.prefs(this).getString("urgent_words", "");
-        DecisionEngine.Input input = new DecisionEngine.Input();
-        input.packageName = packageName;
-        input.category = category;
-        input.notificationCategory = notificationCategory;
-        input.title = title;
-        input.text = body;
-        input.urgentWords = urgentWords;
-        input.role = DecisionEngine.Role.NORMAL;
-        input.focusActive = focus;
-        input.keepPreviews = keepPreviews;
-        input.minutesToBreak = FocusUtils.minutesToBreak(this);
-        boolean vip = FocusUtils.isVip(this, title, body);
-        String exceptionReason = DecisionEngine.hardExceptionReason(input);
-        if (vip) exceptionReason = "Exception: VIP contact is on your allow list.";
-        if (!exceptionReason.isEmpty()) {
-            recordCallback(now, rawPackage, "decision=ALLOW role=" + roleText + " reason=" + exceptionReason);
-            return;
-        }
-
-        if (role == DecisionEngine.AppRole.BLOCK_IN_FOCUS &&
-            FocusUtils.prefs(this).getBoolean("snooze_release_once_" + keyHash, false)) {
-            FocusUtils.prefs(this).edit().remove("snooze_release_once_" + keyHash).remove("snooze_release_" + keyHash).apply();
-            org.json.JSONObject released = store.findByKey(keyHash);
-            if (released != null) store.updateState(released.optLong("id"), "RELEASED", 0L, "ALLOW", "Released by your request; this repost was allowed once.");
-            recordCallback(now, rawPackage, "decision=ALLOW role=BLOCK_IN_FOCUS reason=release request; allow this repost once");
-            return;
-        }
-
-        long scheduledRelease = FocusUtils.prefs(this).getLong("snooze_release_" + keyHash, 0L);
-        if (role == DecisionEngine.AppRole.BLOCK_IN_FOCUS && scheduledRelease > 0L) {
-            if (DecisionEngine.shouldAllowSnoozeReleaseOnce(scheduledRelease, now)) {
-                FocusUtils.prefs(this).edit().remove("snooze_release_" + keyHash).apply();
-                org.json.JSONObject released = store.findByKey(keyHash);
-                if (released != null) store.updateState(released.optLong("id"), "RELEASED", 0L, "ALLOW", "The snoozed notification returned at its scheduled release and was allowed once.");
-                recordCallback(now, rawPackage, "decision=ALLOW reason=snooze release; allow once");
-                return;
-            }
-            boolean snoozedAgain = false;
-            try { snoozeNotification(sbn.getKey(), scheduledRelease - now); snoozedAgain = true; }
-            catch (RuntimeException error) { try { cancelNotification(sbn.getKey()); } catch (RuntimeException ignored) { } }
-            recordCallback(now, rawPackage, "action=" + (snoozedAgain ? "SNOOZE" : "CANCEL") + " result=retained early re-post");
-            return;
-        }
-
-        DecisionEngine.Result result;
-        long releaseAt = 0L;
-
-        // Blocked apps are snoozed before database writes or cost/history work.
-        if (focus && role == DecisionEngine.AppRole.BLOCK_IN_FOCUS && exceptionReason.isEmpty()) {
-            releaseAt = FocusUtils.nextReleaseAt(this);
-            boolean snoozed = false;
-            try { snoozeNotification(sbn.getKey(), releaseAt - now); snoozed = true; }
-            catch (RuntimeException error) {
-                try { cancelNotification(sbn.getKey()); }
-                catch (RuntimeException cancelError) { }
-            }
-            // A BLOCK role is deterministic; learned estimates cannot change this action.
-            result = new DecisionEngine.Result(DecisionEngine.Action.DEFER,
-                "This app is set to Block in focus.", 0.0, 0.0, 0.0, 0.0, 0.0, 0, false);
-            org.json.JSONObject existing = store.findByKey(keyHash);
-            String decisionReason = "This app is set to Block in focus.";
-            if (!snoozed) decisionReason += " Android snooze failed; notification was cancelled as fallback.";
-            FocusUtils.prefs(this).edit().putLong("snooze_release_" + keyHash, releaseAt).apply();
-            if (existing == null || !"HELD".equals(existing.optString("state"))) {
-                Store.Event held = makeEvent(keyHash, packageName, label, category, roleText, channel, now, true, "DEFER", "HELD", decisionReason, result, releaseAt, isTest ? "test" : "real", null);
-                try { long id = store.insert(held); store.incrementShown(packageName, held.source); }
-                catch (RuntimeException error) { Log.d("AttentionTwin", "database write failed after block action"); }
-            } else store.updateState(existing.optLong("id"), "HELD", releaseAt, "DEFER", decisionReason);
-            recordCallback(now, rawPackage, "decision=DEFER role=BLOCK_IN_FOCUS reason=" + decisionReason + " action=" + (snoozed ? "SNOOZE" : "CANCEL fallback"));
-            return;
-        }
-        org.json.JSONObject existing = store.findByKey(keyHash);
-        if (existing != null && now - existing.optLong("ts", 0L) < 4000L) {
-            recordCallback(now, rawPackage, "decision=DEDUPED role=" + roleText + " reason=same notification key within 4 seconds");
-            return;
-        }
-        input.stats = store.stats(packageName, isTest ? "test" : "real");
-        result = engine.evaluateForAppRoleSafely(input, role);
-        if (!exceptionReason.isEmpty()) result = new DecisionEngine.Result(DecisionEngine.Action.ALLOW, exceptionReason, result.openRateEstimate, result.importanceEstimate, result.allowCost, result.deferCost, result.suppressCost, result.observations, true);
-        DecisionEngine.Action action = result.action;
-        String reason = result.reason;
-        if (action == DecisionEngine.Action.SUPPRESS && !keepPreviews) {
-            action = DecisionEngine.Action.DEFER;
-            reason = "Suppression requires Keep previews; safely falling back to deferral. " + reason;
-        }
-        if (action == DecisionEngine.Action.DEFER) {
-            releaseAt = FocusUtils.nextReleaseAt(this);
-            if (Build.VERSION.SDK_INT < 26 || releaseAt == Long.MAX_VALUE || releaseAt <= now) {
-                action = DecisionEngine.Action.ALLOW;
-                reason = "No usable break time is configured; letting the notification through. " + reason;
-                releaseAt = 0L;
+    private void receive(StatusBarNotification sbn,boolean legacy) throws Exception {
+        if(sbn==null||sbn.getNotification()==null)return;Notification n=sbn.getNotification();
+        if(nonActionable(n))return;
+        boolean own=getPackageName().equals(sbn.getPackageName()),test=own&&n.extras!=null&&n.extras.getBoolean("at_test",false);
+        if(own&&!test)return;
+        String pkg=test?n.extras.getString("at_fake_pkg","com.instagram.android"):sbn.getPackageName();
+        String label=label(pkg),title=n.extras==null?"":String.valueOf(n.extras.getCharSequence(Notification.EXTRA_TITLE,""));
+        String role=FocusUtils.roleFor(this,pkg),source=test?"test":"real",hash=keyHash(sbn.getKey());long now=System.currentTimeMillis();
+        boolean active=FocusUtils.isFilteringActive(this),base=active&&(role.equals("SMART")||role.equals("BLOCK_IN_FOCUS")),shield=active&&FocusUtils.prefs(this).getBoolean("block_promotions",true);
+        if(!active||(!base&&!shield)){if(!legacy)log(hash,pkg,label,role,source,"ALLOW","SHOWN",!active?"Filtering is off.":"App rule allows notifications.");return;}
+        String words=FocusUtils.prefs(this).getString("urgent_words","");String group=keyHash(source+"\n"+pkg+"\n"+title);
+        boolean bypass=false,ordinary=false;int added=0,important=0;String lastReason="No new message content.";
+        for(NotificationText.Message message:NotificationText.messages(n)){
+            String text=message.text,kind=NotificationRules.kind(title,text,words);boolean vip=FocusUtils.isVip(this,title,text);
+            DecisionEngine.Input safety=new DecisionEngine.Input();safety.packageName=pkg;safety.notificationCategory=n.category;safety.title=title;safety.text=text;safety.urgentWords="";
+            boolean safe=vip||kind.equals("EMERGENCY")||(!kind.equals("PROMOTION")&&!DecisionEngine.hardExceptionReason(safety).isEmpty());
+            if(!base&&!(shield&&kind.equals("PROMOTION")))continue;
+            if(vip){kind="IMPORTANT";lastReason="VIP contact: bypassed filtering and saved in Important.";}else lastReason=NotificationRules.reason(kind);
+            String state=kind.equals("EMERGENCY")?"IMPORTANT":kind;
+            long timestamp=message.at>0?message.at:(n.when>0?n.when:sbn.getPostTime());timestamp=Math.min(now,timestamp);
+            String fingerprint=keyHash(source+"\n"+pkg+"\n"+title+"\n"+text+"\n"+timestamp);
+            if(timestamp<now-7L*86400000)continue;
+            long id=inbox.capture(fingerprint,group,pkg,label,timestamp,source,title,text,state,lastReason);
+            if(!safe)ordinary=true;
+            if(id<0)continue;added++;if(safe)bypass=true;
+            if(state.equals("IMPORTANT"))important++;
+            else if(state.equals("PENDING")){
+                if(role.equals("SMART")&&GeminiClient.enabled(this))queue(group);
+                else inbox.state(id,"UNKNOWN",role.equals("BLOCK_IN_FOCUS")?"Hold mode: saved for your review; not sent to Gemini.":"Gemini is off: saved for your review.");
             }
         }
-
-        Store.Event event = new Store.Event();
-        event.nkey = keyHash;
-        event.pkg = packageName;
-        event.label = label;
-        event.category = category;
-        event.role = roleText;
-        event.channel = channel;
-        event.ts = now;
-        event.focus = focus;
-        event.action = action.name();
-        event.state = action == DecisionEngine.Action.DEFER ? "HELD"
-            : action == DecisionEngine.Action.SUPPRESS ? "SUPPRESSED" : "SHOWN";
-        event.reason = reason;
-        event.pOpen = result.openRateEstimate;
-        event.cAllow = result.allowCost;
-        event.cDefer = result.deferCost;
-        event.cSuppress = result.suppressCost;
-        event.importance = result.importanceEstimate;
-        event.releaseAt = releaseAt;
-        event.source = isTest ? "test" : "real";
-        event.exception = result.exception ? reason : "";
-        if (action == DecisionEngine.Action.SUPPRESS && keepPreviews) event.preview = (title + "\n" + body).trim();
-        long id;
-        try { id = store.insert(event); }
-        catch (RuntimeException error) { recordCallback(now, rawPackage, "decision=" + action + " role=" + roleText + " database write failed; notification left as Android posted it"); return; }
-        store.incrementShown(packageName, event.source);
-
-        String actionResult = "no notification removal needed";
-        try {
-            if (action == DecisionEngine.Action.DEFER) {
-                snoozeNotification(sbn.getKey(), releaseAt - now);
-                actionResult = "snoozed until " + releaseAt;
-            } else if (action == DecisionEngine.Action.SUPPRESS) {
-                cancelNotification(sbn.getKey());
-                actionResult = "cancelled from shade";
-            }
-        } catch (RuntimeException error) {
-            store.updateState(id, "SHOWN", 0L, "ALLOW", "Android rejected the action; left the notification available.");
-            actionResult = "Android rejected action; allowed fallback";
+        // Capture succeeded before removal. Leaving emergencies/OTPs visible is independent of Gemini.
+        if(!legacy&&ordinary&&!bypass){try{cancelNotification(sbn.getKey());log(hash,pkg,label,role,source,"SUPPRESS","CAPTURED",added+" new messages saved before removal. "+lastReason);}catch(RuntimeException error){log(hash,pkg,label,role,source,"ALLOW","SHOWN","Saved, but Android rejected removing this alert.");}}
+        else if(added>0)log(hash,pkg,label,role,source,"ALLOW",legacy?"RECOVERED":"SHOWN",legacy?"Recovered messages from an earlier Android snooze. Originals remain on Android's schedule.":"Safety exception: original alert remains available.");
+        if(important>0&&!test)notifyImportant(group,label,important);
+        FocusUtils.prefs(this).edit().putLong("last_callback_at",now).putString("last_capture_error","").apply();
+    }
+    private void queue(String group){if(destroyed||!GeminiClient.enabled(this)||scheduled.contains(group)||inFlight.contains(group))return;if(scheduled.size()+inFlight.size()>=30)return;scheduled.add(group);main.postDelayed(()->flush(group),2500);}
+    private void flush(String group){scheduled.remove(group);if(destroyed||!GeminiClient.enabled(this))return;final JSONArray batch;try{batch=inbox.pending(group,12);}catch(JSONException e){return;}if(batch.length()==0)return;if(!"SMART".equals(FocusUtils.roleFor(this,batch.optJSONObject(0).optString("pkg")))){for(int i=0;i<batch.length();i++)inbox.state(batch.optJSONObject(i).optLong("id"),"UNKNOWN","Current app rule does not use Gemini.");return;}inFlight.add(group);for(int i=0;i<batch.length();i++)inbox.state(batch.optJSONObject(i).optLong("id"),"REVIEWING","Gemini batch review in progress.");
+        long version=generation.get();classifier.execute(()->{JSONObject result=null;String failure="";try{if(version==generation.get()&&GeminiClient.enabled(this))result=reviewer.review(this,batch);else failure="Gemini paused.";}catch(Exception e){failure=e.getMessage()==null?"Gemini unavailable.":e.getMessage();}final JSONObject response=result;final String error=failure;main.post(()->{if(version==generation.get())finish(group,batch,response,error);else inFlight.remove(group);});});
+    }
+    private void finish(String group,JSONArray batch,JSONObject response,String failure){if(destroyed)return;inFlight.remove(group);int important=0;JSONArray results=response==null?new JSONArray():response.optJSONArray("items");
+        for(int i=0;i<batch.length();i++){JSONObject item=batch.optJSONObject(i);long id=item.optLong("id");String state="UNKNOWN",reason="Review unavailable; saved for your review. "+failure;
+            if(results!=null&&GeminiClient.enabled(this))for(int j=0;j<results.length();j++){JSONObject r=results.optJSONObject(j);if(r==null||r.optLong("id",-1)!=id)continue;String kind=r.optString("classification");double confidence=r.optDouble("confidence",-1);if(!Double.isFinite(confidence)||confidence<0||confidence>1)break;if((kind.equals("URGENT")||kind.equals("IMPORTANT"))&&confidence>=.6){state="IMPORTANT";important++;}else if(kind.equals("CASUAL")||kind.equals("ROUTINE"))state="CASUAL";reason="Gemini batch · "+kind+" ("+Math.round(confidence*100)+"%). Saved in "+(state.equals("IMPORTANT")?"Important":"inbox")+".";break;}
+            inbox.state(id,state,reason);
         }
-        recordCallback(now, rawPackage, "decision=" + action + " role=" + roleText + " reason=" + reason + " actionResult=" + actionResult);
+        if(response!=null&&GeminiClient.enabled(this))try{String summary=response.optString("summary");if(!summary.isEmpty())inbox.summary(group,summary.substring(0,Math.min(summary.length(),500)),batch.length());}catch(Exception ignored){}
+        JSONObject first=batch.optJSONObject(0);if(important>0&&first!=null&&!first.optString("source").equals("test"))notifyImportant(group,first.optString("label","App"),important);
+        reviewWaiting();
     }
-
-    private void recordCallback(long at, String pkg, String outcome) {
-        FocusUtils.prefs(this).edit().putLong("last_callback_at", at).apply();
-        Log.d("AttentionTwin", "posted pkg=" + pkg + " at=" + at + " " + outcome);
-    }
-
-    private Store.Event makeEvent(String key, String pkg, String label, String category, String role, String channel, long ts, boolean focus, String action, String state, String reason, DecisionEngine.Result result, long releaseAt, String source, String preview) {
-        Store.Event e = new Store.Event(); e.nkey=key; e.pkg=pkg; e.label=label; e.category=category; e.role=role; e.channel=channel; e.ts=ts; e.focus=focus; e.action=action; e.state=state; e.reason=reason; e.pOpen=result.openRateEstimate; e.cAllow=result.allowCost; e.cDefer=result.deferCost; e.cSuppress=result.suppressCost; e.importance=result.importanceEstimate; e.releaseAt=releaseAt; e.source=source; e.preview=preview; e.exception=result.exception?reason:""; return e;
-    }
-
-    @Override public void onNotificationRemoved(StatusBarNotification sbn, RankingMap rankingMap, int reason) {
-        if (sbn == null || store == null) return;
-        String hash = keyHash(sbn.getKey());
-        org.json.JSONObject event = store.findByKey(hash);
-        if (event == null) return;
-        if (reason == NotificationListenerService.REASON_CLICK) {
-            store.markOpenedByKey(hash);
-            return;
-        }
-        if ("SUPPRESSED".equals(event.optString("state")) || reason == NotificationListenerService.REASON_SNOOZED) return;
-    }
-
-    private boolean isNonActionable(Notification notification) {
-        int flags = notification.flags;
-        if ((flags & Notification.FLAG_ONGOING_EVENT) != 0 || (flags & Notification.FLAG_NO_CLEAR) != 0) return true;
-        if (Build.VERSION.SDK_INT >= 26 && notification.getChannelId() == null) return true;
-        String category = notification.category;
-        return Notification.CATEGORY_SERVICE.equals(category)
-            || Notification.CATEGORY_TRANSPORT.equals(category)
-            || Notification.CATEGORY_CALL.equals(category)
-            || Notification.CATEGORY_ALARM.equals(category)
-            || Notification.CATEGORY_NAVIGATION.equals(category);
-    }
-
-    private String applicationLabel(String packageName) {
-        try {
-            android.content.pm.ApplicationInfo info = getPackageManager().getApplicationInfo(packageName, 0);
-            CharSequence label = getPackageManager().getApplicationLabel(info);
-            return label == null ? packageName : label.toString();
-        } catch (Exception ignored) { return packageName; }
-    }
-
-    private static String stringExtra(Bundle extras, String key) {
-        Object value = extras.get(key);
-        return value == null ? "" : String.valueOf(value);
-    }
-
-    static String keyHash(String key) {
-        try {
-            byte[] digest = MessageDigest.getInstance("SHA-256").digest(key.getBytes(StandardCharsets.UTF_8));
-            StringBuilder out = new StringBuilder();
-            for (int i = 0; i < 16; i++) out.append(String.format(Locale.ROOT, "%02x", digest[i]));
-            return out.toString();
-        } catch (Exception ignored) { return Integer.toHexString(key.hashCode()); }
-    }
-
-    private static String safe(String value) { return value == null ? "" : value; }
+    private void notifyImportant(String group,String label,int count){NotificationManager manager=(NotificationManager)getSystemService(NOTIFICATION_SERVICE);if(manager==null)return;manager.createNotificationChannel(new NotificationChannel("important_inbox_v5","Important captured messages",NotificationManager.IMPORTANCE_HIGH));Intent open=new Intent(this,MainActivity.class).putExtra("at_page","messages").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK|Intent.FLAG_ACTIVITY_SINGLE_TOP);PendingIntent intent=PendingIntent.getActivity(this,7000+Math.abs(group.hashCode()%10000),open,PendingIntent.FLAG_UPDATE_CURRENT|PendingIntent.FLAG_IMMUTABLE);try{manager.notify("important-inbox",Math.abs(group.hashCode()),new Notification.Builder(this,"important_inbox_v5").setSmallIcon(R.drawable.ic_stat_attention).setContentTitle("Important · "+label).setContentText("Open AttentionTwin to review important messages.").setContentIntent(intent).setAutoCancel(true).setVisibility(Notification.VISIBILITY_PRIVATE).setGroup("attentiontwin.important").build());}catch(SecurityException ignored){}}
+    private void log(String hash,String pkg,String label,String role,String source,String action,String state,String reason){Store.Event event=new Store.Event();event.nkey=hash;event.pkg=pkg;event.label=label;event.category=FocusUtils.categoryFor(pkg,label);event.role=role;event.ts=System.currentTimeMillis();event.focus=FocusUtils.isFilteringActive(this);event.action=action;event.state=state;event.reason=reason;event.source=source;try{history.insert(event);}catch(RuntimeException ignored){}}
+    @Override public void onNotificationRemoved(StatusBarNotification sbn,RankingMap map,int reason){if(sbn!=null&&history!=null&&reason==REASON_CLICK)history.markOpenedByKey(keyHash(sbn.getKey()));}
+    private boolean nonActionable(Notification n){return (n.flags&(Notification.FLAG_ONGOING_EVENT|Notification.FLAG_NO_CLEAR))!=0||Notification.CATEGORY_SERVICE.equals(n.category)||Notification.CATEGORY_TRANSPORT.equals(n.category)||Notification.CATEGORY_CALL.equals(n.category)||Notification.CATEGORY_ALARM.equals(n.category)||Notification.CATEGORY_NAVIGATION.equals(n.category);}
+    private String label(String pkg){try{return getPackageManager().getApplicationLabel(getPackageManager().getApplicationInfo(pkg,0)).toString();}catch(Exception e){return pkg;}}
+    static String keyHash(String value){try{byte[] bytes=MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8));StringBuilder out=new StringBuilder();for(int i=0;i<16;i++)out.append(String.format(Locale.ROOT,"%02x",bytes[i]));return out.toString();}catch(Exception e){return Integer.toHexString(value.hashCode());}}
 }

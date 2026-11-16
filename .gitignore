@@ -63,3 +63,7 @@ logs/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Local wellness build artifacts
+.presentation-build/
+frontend/test-results/

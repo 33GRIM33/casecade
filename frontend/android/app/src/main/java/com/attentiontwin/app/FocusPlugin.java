@@ -36,6 +36,69 @@ public final class FocusPlugin extends Plugin {
     private static final String FOCUS_CHANNEL = "attentiontwin_focus";
     private static final String RESTORE_CHANNEL = "attentiontwin_restored";
     private final DecisionEngine engine = new DecisionEngine();
+    private static final java.util.concurrent.ExecutorService AI_SETUP = java.util.concurrent.Executors.newSingleThreadExecutor();
+
+    private JSObject aiConfiguration() {
+        return new JSObject().put("configured",GeminiClient.configured(getContext())).put("enabled",GeminiClient.enabled(getContext())).put("model",GeminiClient.model(getContext())).put("status",GeminiClient.status(getContext()));
+    }
+    @PluginMethod public void getAiConfig(PluginCall call) { call.resolve(aiConfiguration()); }
+    @PluginMethod public void configureAi(PluginCall call) {
+        AI_SETUP.execute(()->{try { GeminiClient.configure(getContext(),call.getString("key", "").trim(),call.getBoolean("enabled",false));call.resolve(aiConfiguration()); } catch(Exception error) { call.reject(error.getMessage()==null?"Gemini could not connect.":error.getMessage()); }});
+    }
+    @PluginMethod public void setAiEnabled(PluginCall call) { GeminiClient.setEnabled(getContext(),call.getBoolean("enabled",false));FocusListenerService.reviewWaiting();call.resolve(aiConfiguration()); }
+    @PluginMethod public void clearAi(PluginCall call) { GeminiClient.clear(getContext());call.resolve(); }
+
+    private JSObject protection() {
+        android.content.SharedPreferences p=FocusUtils.prefs(getContext());
+        return new JSObject().put("blockPromotions",p.getBoolean("block_promotions",true)).put("policy",p.getString("smart_policy","focus_first")).put("scope",p.getString("filter_scope","focus")).put("criteria",p.getString("importance_criteria","")).put("holdMinutes",p.getInt("defer_minutes",15)).put("active",FocusUtils.isFilteringActive(getContext()));
+    }
+    @PluginMethod public void getProtection(PluginCall call){call.resolve(protection());}
+    @PluginMethod public void setAllRoles(PluginCall call){
+        String role=call.getString("role","SMART");boolean keep=call.getBoolean("keepImportant",true);
+        if(!role.matches("SMART|BLOCK_IN_FOCUS|ALLOW")){call.reject("Choose Smart, Hold or Allow.");return;}
+        int changed=FocusUtils.applyAllRoles(getContext(),role,keep,call.getBoolean("throughoutDay",true));AttentionWidget.updateAll(getContext());call.resolve(new JSObject().put("role",role).put("resetOverrides",changed));
+    }
+    @PluginMethod public void getAppearance(PluginCall call){call.resolve(new JSObject().put("theme",getContext().getSharedPreferences("appearance",0).getString("theme","system")).put("route",getActivity().getIntent().getStringExtra("at_page")));getActivity().getIntent().removeExtra("at_page");}
+    @PluginMethod public void setAppearance(PluginCall call){String theme=call.getString("theme","system");if(!theme.matches("system|light|dark")){call.reject("Choose a theme.");return;}getContext().getSharedPreferences("appearance",0).edit().putString("theme",theme).apply();getActivity().runOnUiThread(()->MainActivity.applyTheme(getActivity()));call.resolve();}
+    @PluginMethod public void pinWidget(PluginCall call){android.appwidget.AppWidgetManager manager=android.appwidget.AppWidgetManager.getInstance(getContext());if(!manager.isRequestPinAppWidgetSupported()){call.reject("This launcher does not support pinning. Long-press Home, choose Widgets, then AttentionTwin.");return;}manager.requestPinAppWidget(new ComponentName(getContext(),AttentionWidget.class),null,null);call.resolve();}
+    @PluginMethod public void setProtection(PluginCall call){
+        String policy=call.getString("policy","focus_first"),scope=call.getString("scope","focus"),criteria=call.getString("criteria","").trim();int minutes=call.getInt("holdMinutes",15);
+        if(!policy.matches("focus_first|balanced")||!scope.matches("focus|always")||criteria.length()>500||minutes<5||minutes>60){call.reject("Check your protection preferences.");return;}
+        FocusUtils.prefs(getContext()).edit().putBoolean("block_promotions",call.getBoolean("blockPromotions",true)).putString("smart_policy",policy).putString("filter_scope",scope).putString("importance_criteria",criteria).putInt("defer_minutes",minutes).apply();AttentionWidget.updateAll(getContext());call.resolve(protection());
+    }
+    @PluginMethod public void previewNotification(PluginCall call){AI_SETUP.execute(()->{
+        try{String pkg=call.getString("pkg",""),title=call.getString("title","Sample"),text=call.getString("text","");
+            if(text.length()>500||title.length()>120){call.reject("Use up to 500 characters for a sample.");return;}
+            String role=FocusUtils.roleFor(getContext(),pkg);DecisionEngine.Input input=new DecisionEngine.Input();input.packageName=pkg;input.title=title;input.text=text;input.urgentWords=FocusUtils.prefs(getContext()).getString("urgent_words","");
+            String kind=NotificationRules.kind(title,text,input.urgentWords);boolean vip=FocusUtils.isVip(getContext(),title,text);input.urgentWords="";String exception=DecisionEngine.hardExceptionReason(input);boolean defer=false;String reason;
+            if(kind.equals("EMERGENCY")||vip||(!kind.equals("PROMOTION")&&!exception.isEmpty()))reason=NotificationRules.reason("EMERGENCY");
+            else if(kind.equals("PROMOTION")&&FocusUtils.prefs(getContext()).getBoolean("block_promotions",true)){defer=true;reason=NotificationRules.reason(kind);}
+            else if(role.equals("ALLOW")||role.equals("IMPORTANT"))reason="App rule allows this notification.";
+            else{defer=true;reason=kind.equals("PENDING")?"Captured first. Batch review or manual review decides its importance in the inbox.":NotificationRules.reason(kind);}
+            call.resolve(new JSObject().put("action",defer?"DEFER":"ALLOW").put("reason",reason).put("active",FocusUtils.isFilteringActive(getContext())));
+        }catch(Exception e){call.reject("Preview could not run.");}
+    });}
+    @PluginMethod public void getScrollGuard(PluginCall call){call.resolve(ScrollGuardService.state(getContext()));}
+    @PluginMethod public void setScrollGuard(PluginCall call){
+        boolean enabled=call.getBoolean("enabled",false);int interval=call.getInt("intervalSeconds",300),budget=call.getInt("dailyBudgetMinutes",0);
+        int ig=call.getInt("instagramLimitMinutes",0),yt=call.getInt("youtubeLimitMinutes",0);String mode=call.getString("limitMode","remind");
+        if(interval<10||interval>3600||budget<0||budget>240||ig<0||ig>240||yt<0||yt>240||!mode.matches("remind|block")){call.reject("Choose valid reminder intervals and daily goals.");return;}
+        android.content.SharedPreferences p=ScrollGuardService.prefs(getContext());
+        if(enabled&&!p.getBoolean("consent",false)&&!call.getBoolean("consent",false)){call.reject("Review and accept the Scroll Guard disclosure first.");return;}
+        if(enabled&&mode.equals("block")&&budget==0&&ig==0&&yt==0){call.reject("Set at least one daily goal before enabling blocking.");return;}
+        p.edit().putBoolean("enabled",enabled).putBoolean("consent",p.getBoolean("consent",false)||call.getBoolean("consent",false)).putInt("interval",interval).putInt("budget",budget).putInt("ig_limit",ig).putInt("yt_limit",yt).putString("limit_mode",mode).putBoolean("instagram",call.getBoolean("instagram",true)).putBoolean("youtube",call.getBoolean("youtube",true)).putBoolean("shorts_only",call.getBoolean("shortsOnly",false)).putBoolean("overlay",call.getBoolean("overlay",true)).putLong("paused_until",call.getLong("pausedUntil",0L)).apply();ScrollGuardService.refresh();AttentionWidget.updateAll(getContext());call.resolve(ScrollGuardService.state(getContext()));
+    }
+    @PluginMethod public void testScrollBlock(PluginCall call){if(!ScrollGuardService.testBlock())call.reject("Connect Scroll Guard in Android Accessibility settings first.");else call.resolve();}
+    @PluginMethod public void openScrollAccess(PluginCall call){if(ScrollGuardService.accessGranted(getContext())&&!call.getBoolean("manage",false)){call.resolve();return;}getActivity().startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));call.resolve();}
+    @PluginMethod public void testScrollGuard(PluginCall call){if(!ScrollGuardService.testReminder())call.reject("Enable AttentionTwin Scroll Guard in Android Accessibility settings first.");else call.resolve();}
+
+    @PluginMethod public void scheduleReminder(PluginCall call) {
+        int id = call.getInt("id", 0);
+        long at = call.getLong("at", 0L);
+        if (id < 901 || id > 903) { call.reject("Invalid reminder"); return; }
+        WellnessReceiver.schedule(getContext(), id, at, call.getString("title", "Check in"), call.getString("text", "Take a breath."), call.getBoolean("daily",false));
+        call.resolve();
+    }
 
     @PluginMethod public void getState(PluginCall call) {
         FocusUtils.clearExpiredManualPause(getContext());
@@ -47,8 +110,10 @@ public final class FocusPlugin extends Plugin {
         result.put("accessGranted", FocusUtils.hasNotificationAccess(getContext()));
         result.put("listenerConnected", FocusListenerService.connected);
         result.put("listenerConnectedAt", FocusListenerService.connectedAt);
+        result.put("captureError",FocusUtils.prefs(getContext()).getString("last_capture_error",""));
         result.put("lastCallbackAt", FocusUtils.prefs(getContext()).getLong("last_callback_at", 0L));
         result.put("focusActive", FocusUtils.isFocusActive(getContext()));
+        result.put("filteringActive", FocusUtils.isFilteringActive(getContext()));
         result.put("paused", FocusUtils.prefs(getContext()).getBoolean("paused", false));
         result.put("focusUntil", until == Long.MAX_VALUE ? -1L : until);
         long nextBreak = FocusUtils.nextBreakAt(getContext());
@@ -56,6 +121,8 @@ public final class FocusPlugin extends Plugin {
         PowerManager power = (PowerManager) getContext().getSystemService(android.content.Context.POWER_SERVICE);
         result.put("batteryOptimizationIgnored", Build.VERSION.SDK_INT < 23 || (power != null && power.isIgnoringBatteryOptimizations(getContext().getPackageName())));
         result.put("manufacturer", Build.MANUFACTURER == null ? "Unknown" : Build.MANUFACTURER);
+        android.app.AlarmManager alarms=(android.app.AlarmManager)getContext().getSystemService(android.content.Context.ALARM_SERVICE);
+        result.put("preciseReminders",Build.VERSION.SDK_INT<31 || (alarms!=null&&alarms.canScheduleExactAlarms()));
         boolean dndAccess = DndController.hasAccess(getContext());
         result.put("dndPolicyAccess", dndAccess);
         NotificationManager notifications = (NotificationManager) getContext().getSystemService(android.content.Context.NOTIFICATION_SERVICE);
@@ -71,14 +138,14 @@ public final class FocusPlugin extends Plugin {
         long until;
         if (minutes == -1) until = Long.MAX_VALUE;
         else if (minutes <= 0) until = 0L;
-        else until = System.currentTimeMillis() + Math.min(minutes, 12 * 60) * 60000L;
+        else until = System.currentTimeMillis() + Math.min(Math.max(1, call.getInt("seconds", minutes * 60)), 12 * 60 * 60) * 1000L;
         android.content.SharedPreferences.Editor editor = FocusUtils.prefs(getContext()).edit().putLong("focus_until", until);
         if (minutes <= 0) {
             long resumeAt = FocusUtils.nextFocusWindowStartAt(getContext());
             editor.putLong("focus_paused_until", resumeAt == Long.MAX_VALUE ? Long.MAX_VALUE : resumeAt);
         } else editor.remove("focus_paused_until");
         editor.apply();
-        FocusScheduler.scheduleFocusEnd(getContext());
+        FocusScheduler.scheduleFocusEnd(getContext()); AttentionWidget.updateAll(getContext());
         DndController.reconcile(getContext());
         JSObject result = new JSObject();
         result.put("focusActive", FocusUtils.isFocusActive(getContext()));
@@ -90,7 +157,7 @@ public final class FocusPlugin extends Plugin {
         boolean paused = call.getBoolean("paused", true);
         FocusUtils.prefs(getContext()).edit().putBoolean("paused", paused).apply();
         DndController.reconcile(getContext());
-        FocusScheduler.scheduleNext(getContext());
+        FocusScheduler.scheduleNext(getContext()); AttentionWidget.updateAll(getContext());
         call.resolve(new JSObject().put("paused", paused).put("focusActive", FocusUtils.isFocusActive(getContext())));
     }
 
@@ -122,7 +189,7 @@ public final class FocusPlugin extends Plugin {
             editor.putLong("focus_paused_until", FocusUtils.nextFocusWindowStartAt(getContext()));
         }
         editor.apply();
-        FocusScheduler.scheduleNext(getContext());
+        FocusScheduler.scheduleNext(getContext()); AttentionWidget.updateAll(getContext());
         DndController.reconcile(getContext());
         call.resolve(settingsObject());
     }
@@ -170,6 +237,11 @@ public final class FocusPlugin extends Plugin {
             call.resolve(new JSObject().put("events", store.listEvents(state, limit, includeDemo)));
         }
     }
+    @PluginMethod public void getInbox(PluginCall call){try(InboxStore inbox=new InboxStore(getContext())){inbox.prune();long version=InboxStore.revision();if(call.getLong("since",-1L)==version){call.resolve(new JSObject().put("unchanged",true).put("revision",version));return;}call.resolve(new JSObject().put("revision",version).put("messages",inbox.messages(call.getBoolean("tests",false))).put("summaries",inbox.summaries()));}catch(Exception e){call.reject("Could not open the saved inbox.");}}
+    @PluginMethod public void markInboxRead(PluginCall call){try(InboxStore inbox=new InboxStore(getContext())){inbox.read(call.getString("group",""));call.resolve();}}
+    @PluginMethod public void clearInbox(PluginCall call){FocusListenerService.invalidateInbox();try(InboxStore inbox=new InboxStore(getContext())){inbox.clear();call.resolve();}}
+    @PluginMethod public void retryInbox(PluginCall call){try(InboxStore inbox=new InboxStore(getContext())){inbox.retry(getContext());}FocusListenerService.reviewWaiting();call.resolve();}
+    @PluginMethod public void dismissKeyboard(PluginCall call){getActivity().runOnUiThread(()->{android.view.inputmethod.InputMethodManager manager=(android.view.inputmethod.InputMethodManager)getContext().getSystemService(android.content.Context.INPUT_METHOD_SERVICE);manager.hideSoftInputFromWindow(getActivity().getWindow().getDecorView().getWindowToken(),0);});call.resolve();}
 
     @PluginMethod public void feedback(PluginCall call) {
         long id = call.getLong("id", -1L);
@@ -192,7 +264,7 @@ public final class FocusPlugin extends Plugin {
             JSONArray items = store.listEvents("SUPPRESSED", 300, false);
             for (int i = 0; i < items.length(); i++) {
                 JSONObject item = items.optJSONObject(i);
-                if (item == null) continue;
+                if (item == null || !"real".equals(item.optString("source"))) continue;
                 String preview = item.optString("preview", "");
                 if (preview.isEmpty()) continue;
                 postRestored(item.optString("label", "App"), preview, item.optLong("id"));
@@ -200,11 +272,11 @@ public final class FocusPlugin extends Plugin {
                 restored++;
             }
             JSONArray waiting = store.heldEvents(false);
-            held = waiting.length();
             android.content.SharedPreferences.Editor prefs = FocusUtils.prefs(getContext()).edit();
             for (int i = 0; i < waiting.length(); i++) {
                 JSONObject item = waiting.optJSONObject(i);
-                if (item == null) continue;
+                if (item == null || !"real".equals(item.optString("source"))) continue;
+                held++;
                 String hash = item.optString("nkey", "");
                 if (!hash.isEmpty()) {
                     prefs.putBoolean("snooze_release_once_" + hash, true).remove("snooze_release_" + hash);
@@ -317,11 +389,18 @@ public final class FocusPlugin extends Plugin {
     }
 
     @PluginMethod public void clearData(PluginCall call) {
+        GeminiClient.setEnabled(getContext(),false);
+        FocusUtils.prefs(getContext()).edit().putBoolean("paused",true).apply();
+        FocusListenerService.invalidateInbox();
+        try(InboxStore inbox=new InboxStore(getContext())){inbox.clear();}
+        GeminiClient.clear(getContext());
+        ScrollGuardService.clear(getContext());
+        for (int id : new int[]{901,902,903}) WellnessReceiver.schedule(getContext(), id, 0, "", "");
         FocusUtils.prefs(getContext()).edit().putLong("focus_until", 0L).apply();
         DndController.reconcile(getContext());
         try (Store store = new Store(getContext())) { store.deleteAll(); }
         FocusUtils.prefs(getContext()).edit().clear().apply();
-        FocusScheduler.scheduleNext(getContext());
+        FocusScheduler.scheduleNext(getContext()); AttentionWidget.updateAll(getContext());
         call.resolve();
     }
 
@@ -336,6 +415,11 @@ public final class FocusPlugin extends Plugin {
 
     @PluginMethod public void openAppSettings(PluginCall call) {
         openIntent(call, new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + getContext().getPackageName())));
+    }
+
+    @PluginMethod public void openExactSettings(PluginCall call) {
+        if(Build.VERSION.SDK_INT>=31)openIntent(call,new Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM,Uri.parse("package:"+getContext().getPackageName())));
+        else call.resolve();
     }
 
     @PluginMethod public void openBatterySettings(PluginCall call) {
@@ -361,6 +445,8 @@ public final class FocusPlugin extends Plugin {
         if (Build.VERSION.SDK_INT < 33 || getContext().checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
             call.resolve(new JSObject().put("granted", true)); return;
         }
+        if(FocusUtils.prefs(getContext()).getBoolean("post_permission_requested",false)&&!call.getBoolean("force",false)){call.resolve(new JSObject().put("granted",false));return;}
+        FocusUtils.prefs(getContext()).edit().putBoolean("post_permission_requested",true).apply();
         requestPermissionForAlias("postNotifications", call, "postPermissionResult");
     }
 

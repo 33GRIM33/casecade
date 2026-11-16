@@ -1,0 +1,8 @@
+AttentionTwin 2.0-calm (versionCode 3)
+Android 8+ (minSdk26), targetSdk36
+Debug-signed demonstration APK
+SHA256 d245b930c265f70e3341cd0ed53375d044014d917ab92c08dfdd81278e588cb2
+Bytes 4330039
+No API key is included. Configure Gemini on the phone.
+Build: npm ci; npm run build; npx cap sync android; gradlew assembleDebug testDebugUnitTest
+Native verification details: VERIFICATION.md

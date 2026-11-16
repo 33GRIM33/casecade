@@ -112,6 +112,11 @@ public final class Store extends SQLiteOpenHelper {
         return listEvents("HELD", 300, includeDemo);
     }
 
+    public synchronized void releaseHeldByKey(String hash,String reason) {
+        ContentValues values=new ContentValues();values.put("state","RELEASED");values.put("action","ALLOW");values.put("releaseAt",0L);values.put("reason",reason);
+        getWritableDatabase().update(EVENTS,values,"nkey=? AND state='HELD'",new String[]{hash});
+    }
+
     public synchronized int countDueHeld(long now) {
         try (Cursor c = getReadableDatabase().rawQuery("SELECT COUNT(*) FROM events WHERE state='HELD' AND source!='demo' AND releaseAt>0 AND releaseAt<=?", new String[]{String.valueOf(now)})) {
             return c.moveToFirst() ? c.getInt(0) : 0;

@@ -1,0 +1,8 @@
+AttentionTwin 4.0-goals (versionCode 5)
+Android 8+ (minSdk26), targetSdk36
+Debug-signed demonstration APK
+SHA256 09a274ae915b1309d0d55675d6910222fa189afcf45b57bb08978dcc3621667f
+Bytes 4373975
+No key is included. Existing on-device key is retained on normal upgrade.
+Build: npm ci; npm run build; npx cap sync android; gradlew assembleDebug testDebugUnitTest
+Test evidence and physical-device limits: VERIFICATION.md

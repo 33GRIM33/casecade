@@ -1,0 +1,15 @@
+AttentionTwin Wellness
+Package: com.attentiontwin.app
+Version: 1.1-wellness (2)
+Minimum Android: 8.0 (API 26)
+Target SDK: 36
+Signing: Android debug key, v2 signature verified with apksigner
+APK bytes: 4599559
+SHA256: fb6241bbb025f7fa959f768cb86dbc01d689c318c8ed6157be78233d1ac57e77
+Base repository: https://github.com/rakshit-ladda/casecade
+Base commit: ae67c8dcc67db7f953bf39e0e7def5c112e8bc54
+Source contains local changes beyond the base commit.
+Build: Java 21, Gradle 8.14.3; npm ci, npm run build, npx cap sync android, gradlew assembleDebug testDebugUnitTest
+Verified: Android build; 16 DecisionEngine tests plus original example; 3 wellness model tests; headless browser walkthrough.
+Not verified: physical Android installation, notification delivery, TalkBack, participant usability.
+Research templates contain no participant results.

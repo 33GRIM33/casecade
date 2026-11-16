@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android" android:id="@+id/widget_root" android:layout_width="match_parent" android:layout_height="match_parent" android:orientation="vertical" android:gravity="center_vertical" android:padding="16dp" android:background="@drawable/widget_dark">
+ <TextView android:id="@+id/widget_title" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="AttentionTwin" android:textSize="22sp" android:textColor="#EBF4E6" android:fontFamily="serif"/>
+ <TextView android:id="@+id/widget_status" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="6dp" android:text="Your daily pause" android:textColor="#B4C6AB" android:textSize="12sp"/>
+ <TextView android:id="@+id/widget_usage" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="6dp" android:text="Open scrolling goals to set your limits" android:textColor="#B4C6AB" android:textSize="12sp"/>
+ <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal" android:layout_marginTop="8dp">
+  <TextView android:id="@+id/widget_focus" android:layout_width="0dp" android:layout_weight="1" android:layout_height="48dp" android:gravity="center" android:text="Focus" android:textColor="#EBF4E6" android:textStyle="bold"/>
+  <TextView android:id="@+id/widget_goals" android:layout_width="0dp" android:layout_weight="1" android:layout_height="48dp" android:gravity="center" android:text="Scroll goals" android:textColor="#EBF4E6" android:textStyle="bold"/>
+  <TextView android:id="@+id/widget_theme" android:layout_width="0dp" android:layout_weight="1" android:layout_height="48dp" android:gravity="center" android:text="Light widget" android:textColor="#EBF4E6" android:textSize="12sp"/>
+ </LinearLayout>
+</LinearLayout>

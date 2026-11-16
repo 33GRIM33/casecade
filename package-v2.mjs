@@ -1,0 +1,13 @@
+import fs from 'node:fs/promises';import path from 'node:path';import crypto from 'node:crypto';
+const out='release-v2';await fs.mkdir(`${out}/screenshots`,{recursive:true});
+let html=await fs.readFile('frontend/dist/index.html','utf8');
+const js=html.match(/<script type="module" crossorigin src="([^"]+)"[^>]*><\/script>/),css=html.match(/<link rel="stylesheet" crossorigin href="([^"]+)"[^>]*>/);
+if(!js||!css)throw Error('Missing built assets');
+const code=await fs.readFile(path.join('frontend/dist',js[1]),'utf8'),style=await fs.readFile(path.join('frontend/dist',css[1]),'utf8');
+html=html.replace(js[0],()=>`<script type="module">${code.replace(/<\/script/gi,'<\\/script')}</script>`).replace(css[0],()=>`<style>${style}</style>`);
+await fs.writeFile(`${out}/offline-demo.html`,html);
+const apk=await fs.readFile('frontend/android/app/build/outputs/apk/debug/app-debug.apk');await fs.writeFile(`${out}/AttentionTwin-2.0.apk`,apk);
+await fs.copyFile('docs/V2_RELEASE.md',`${out}/README.md`);
+for(const name of await fs.readdir('frontend/test-results/redesign'))if(name.endsWith('.png'))await fs.copyFile(`frontend/test-results/redesign/${name}`,`${out}/screenshots/${name}`);
+await fs.writeFile(`${out}/BUILD_INFO.txt`,`AttentionTwin 2.0-calm (versionCode 3)\nAndroid 8+ (minSdk26), targetSdk36\nDebug-signed demonstration APK\nSHA256 ${crypto.createHash('sha256').update(apk).digest('hex')}\nBytes ${apk.length}\nNo API key is included. Configure Gemini on the phone.\nBuild: npm ci; npm run build; npx cap sync android; gradlew assembleDebug testDebugUnitTest\nNative verification details: VERIFICATION.md\n`);
+console.log(`Packaged ${out}/AttentionTwin-2.0.apk (${apk.length} bytes)`);

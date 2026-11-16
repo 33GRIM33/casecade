@@ -1,3 +1,35 @@
+# AttentionTwin 5.0 — Latest build
+
+[Android APK](release-v5/AttentionTwin-5.0.apk) · [Setup and release notes](release-v5/README.md) · [Verification](release-v5/VERIFICATION.md) · [Offline UI demo](release-v5/offline-demo.html)
+
+Version 5 replaces conversation snoozing with an encrypted distinct-message inbox, local emergency and promotion rules, grouped Gemini review and an Important inbox. It fixes keyboard resizing, retains permission setup consent, and restores quota blocking after service restart. Upgrade over the previous build. Physical phone and live Gemini behaviour still need verification; see the record above. Older release descriptions below are historical and may describe superseded notification behaviour.
+
+# AttentionTwin 4.0 — Daily goals, pause screens & all-app Smart
+
+Latest build: [AttentionTwin-4.0.apk](release-v4/AttentionTwin-4.0.apk), [setup and changes](release-v4/README.md), [verification](release-v4/VERIFICATION.md), [offline UI preview](release-v4/offline-demo.html).
+
+Version 4 adds visible Home scrolling goals, separate Instagram/YouTube limits, an optional full-screen pause at the daily goal, all-app Smart/Hold controls, local greeting filtering, newest-message parsing, app dark theme, a launcher widget with an independent theme button, and guided planned breaks. Android/JVM tests include framework and listener-pipeline simulations; physical phone and live user-key Gemini behaviour remain unverified.
+
+## Version 3 history
+
+Current build: [AttentionTwin-3.0.apk](release-v3/AttentionTwin-3.0.apk), [setup and release notes](release-v3/README.md), [verification](release-v3/VERIFICATION.md), [offline UI demonstration](release-v3/offline-demo.html).
+
+Version 3 adds optional automatic Instagram/YouTube reminders through an explicitly enabled Accessibility service, daily time reminders, foreground diagnostics, one-minute breathing, configurable notification scope, and focus-first/balanced Gemini filtering. Casual chats are distinguished from time-sensitive requests. Updated Smart conversations are reclassified; real held alerts, history and tests have separate views. The existing encrypted phone key is retained on normal upgrade. Physical device and live Gemini verification remain pending; see the verification record.
+
+## Version 2 history
+
+The current app uses Home, Focus, Alerts and Reflect. Bedtime and scrolling reminders open from Home. The entry point no longer imports the old Lab screens or global styles. See [version 2 release notes](docs/V2_RELEASE.md) and [current APK/output](release-v2/README.md).
+
+This version adds an optional Gemini API connection using a key entered privately on the Android phone. No key ships with the app. Important apps and local safety exceptions bypass classification; unavailable or uncertain Gemini responses allow the alert. No training is needed.
+
+Build and regression details are in release-v2/VERIFICATION.md. The following documentation describes the earlier iterations.
+
+# AttentionTwin Wellness update — 16 November 2026
+
+A new Android debug APK has been built and signature-verified in this workspace. See [deliverables/START_HERE.txt](deliverables/START_HERE.txt) for installation, the offline demonstration and assignment materials. Wellness adds a study-to-break planner, bedtime rituals and reminders, voluntary scrolling check-ins, and a local reflection journal. The Android build, 16 existing decision tests, 3 wellness model tests, and browser core-flow checks pass. Physical Android testing and participant research remain pending. [Report](docs/wellness/REPORT.md).
+
+The following is the original repository documentation; its historical build-status notes predate this update.
+
 # AttentionTwin — Personal Attention Digital Twin
 
 > **Phone app status (2026-10-26):** The app has an on-device notification listener, local SQLite history, focus timer/schedule, break reminders, per-app roles, safety exceptions, and labeled sample activity. The latest source pass makes app roles default to Allow and checks focus/role before reusing any snooze marker. `npm run build` and Capacitor sync pass. The Android test/APK build could not run in this environment because Java is not installed or available; the changed APK has not been produced or installed. Real Redmi/HyperOS behavior is unverified. Android may show an alert briefly before snoozing unless DND access is enabled, and Android controls when snoozed alerts return. Local rules and sample data are estimates, not validated productivity claims. See [`docs/DEVICE_TEST_CHECKLIST.md`](docs/DEVICE_TEST_CHECKLIST.md), [`docs/DATA_AND_ML.md`](docs/DATA_AND_ML.md), and [`docs/DEMO_GUIDE.md`](docs/DEMO_GUIDE.md).

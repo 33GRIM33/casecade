@@ -34,6 +34,11 @@ final class FocusUtils {
         return prefs(context).getLong("focus_until", 0L);
     }
 
+    static boolean isFilteringActive(Context context){
+        if(prefs(context).getBoolean("paused",false))return false;
+        return "always".equals(prefs(context).getString("filter_scope","focus"))||isFocusActive(context);
+    }
+
     static long nextFocusWindowStartAt(Context context) {
         String schedule = prefs(context).getString("focus_schedule", "");
         long now = System.currentTimeMillis(), next = Long.MAX_VALUE;
@@ -115,16 +120,17 @@ final class FocusUtils {
         long release = nextBreakAt(context);
         long focusUntil = focusUntil(context);
         if (focusUntil > now && focusUntil != Long.MAX_VALUE) release = Math.min(release, focusUntil);
-        if (release == Long.MAX_VALUE) release = now + 8L * 60L * 60L * 1000L;
+        if (release == Long.MAX_VALUE || !(focusUntil>now&&focusUntil!=Long.MAX_VALUE)) release = Math.min(release,now+prefs(context).getInt("defer_minutes",15)*60000L);
         return Math.max(now + 1000L, release);
     }
 
     static boolean isVip(Context context, String title, String text) {
         String configured = prefs(context).getString("vip_contacts", "");
-        String message = ((title == null ? "" : title) + " " + (text == null ? "" : text)).toLowerCase(Locale.ROOT);
+        String sender="";if(text!=null){int colon=text.indexOf(':');if(colon>0&&colon<80)sender=text.substring(0,colon);}
+        String message = ((title == null ? "" : title) + " " + sender).toLowerCase(Locale.ROOT);
         for (String entry : configured.split(",")) {
             String name = entry.trim().toLowerCase(Locale.ROOT);
-            if (name.length() >= 2 && message.contains(name)) return true;
+            if (name.length() >= 2 && java.util.regex.Pattern.compile("(?<![\\p{L}\\p{N}])"+java.util.regex.Pattern.quote(name)+"(?![\\p{L}\\p{N}])").matcher(message).find()) return true;
         }
         return false;
     }
@@ -137,7 +143,13 @@ final class FocusUtils {
             return DecisionEngine.AppRole.ALLOW.name();
         }
         if (stored != null) return stored;
-        return DecisionEngine.AppRole.ALLOW.name();
+        return prefs(context).getString("default_role",DecisionEngine.AppRole.ALLOW.name());
+    }
+    static int applyAllRoles(Context context,String role,boolean keepImportant,boolean throughoutDay){
+        if(!role.matches("SMART|BLOCK_IN_FOCUS|ALLOW"))throw new IllegalArgumentException("Invalid role");
+        SharedPreferences p=prefs(context);SharedPreferences.Editor edit=p.edit();int changed=0;
+        for(java.util.Map.Entry<String,?> entry:p.getAll().entrySet())if(entry.getKey().startsWith("role_")&&!(keepImportant&&"IMPORTANT".equals(entry.getValue()))){edit.remove(entry.getKey());changed++;}
+        edit.putString("default_role",role);if(role.equals("ALLOW"))edit.putBoolean("block_promotions",false);if(throughoutDay)edit.putString("filter_scope","always").putBoolean("paused",false);edit.apply();return changed;
     }
 
     static String categoryFor(String packageName, String label) {

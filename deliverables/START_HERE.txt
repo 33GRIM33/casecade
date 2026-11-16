@@ -1,0 +1,24 @@
+ATTENTIONTWIN WELLNESS — PROJECT 2
+
+1. Copy AttentionTwin-Wellness.apk to an Android 8+ phone. Open it and allow installation from that source if Android prompts. It is a debug-signed demonstration build.
+2. Complete setup, or continue without notification access to explore Wellness. Allow notifications for background reminders.
+3. Wellness opens with Study. Choose a one-minute focus and one-minute break for a quick demo.
+4. Explore Wind down, Check-in and Reflect. Settings includes notification app roles.
+5. No server or account is required for wellness. Background reminders are subject to Android battery restrictions.
+
+OFFLINE BROWSER DEMO
+Open offline-demo.html in a modern desktop browser. It includes all screens and local journal persistence. Android notification access and background reminders require the APK. Use the same browser and file path to preserve demo data.
+
+PROJECT MATERIALS
+REPORT.md: problem, requirements, design, procedure, limitations and verified results.
+AttentionTwin-Presentation.pptx: editable presentation.
+wireframes.html: print/draw guide, not hand drawn evidence.
+interview-summary.csv: blank anonymized interview sheet.
+usability-results.csv: blank task observation sheet.
+REVISION_RECORD.md: engineering revisions and participant revision placeholders.
+screenshots: working app screenshots using developer-entered demo values.
+BUILD_INFO.txt: provenance and APK checksum.
+
+Research with 3–5 interviewees and 5–8 usability participants remains to be done. Do not submit blank sheets as completed research.
+
+If Android reports a signature conflict with an existing AttentionTwin installation, preserve any data you need before choosing whether to remove it. Uninstalling removes its local data.

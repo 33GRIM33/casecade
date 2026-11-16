@@ -1,8 +1,10 @@
 <?xml version='1.0' encoding='utf-8'?>
 <resources>
+    <string name="widget_description">Your focus shortcuts and scrolling goals, with light and dark themes.</string>
+    <string name="scroll_guard_description">Optional scrolling reminders for Instagram and YouTube. Detects which app is open and scroll events. Optional Reels/Shorts matching inspects screen element identifiers only. Does not read messages, passwords or typed text, take screenshots, or send screen information to Gemini. Can display a reminder over a watched app. You can pause or disable it at any time.</string>
     <string name="app_name">AttentionTwin</string>
     <string name="title_activity_main">AttentionTwin</string>
     <string name="package_name">com.attentiontwin.app</string>
     <string name="custom_url_scheme">com.attentiontwin.app</string>
-    <string name="notification_access_label">AttentionTwin notification metadata history</string>
+    <string name="notification_access_label">AttentionTwin Smart notification filter</string>
 </resources>
